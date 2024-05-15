@@ -27,11 +27,15 @@ calc_t f (calc_t t, calc_t x) {
 }
 
 calc_t phi (calc_t x) {
-    return x < M_PI / 2 ? sin (2 * x) : 0;
+    return x > 0 && x < M_PI / 2 ? sin (2 * x) : 0;
 }
 
 calc_t psi (calc_t t) {
-    return 0;//t < M_PI / 4 ? sin (4 * t) : 0;
+    return 0;
+}
+
+calc_t solution (calc_t t, calc_t x) {
+    return phi (x - t);
 }
 
 // Схема прямоугольник
@@ -84,7 +88,9 @@ typedef struct {
     int right;
 } ThreadData;
 
-int sem_lock (int num) {
+static int sem_lock (int num) {
+    if (__builtin_expect(nproc == 0, 0))
+        return 0;
     struct sembuf oper = { 
         .sem_flg = 0,
         .sem_num = num,
@@ -93,7 +99,9 @@ int sem_lock (int num) {
     return semop (semid, &oper, 1);
 }
 
-int sem_unlock (int num) {
+static int sem_unlock (int num) {
+    if (__builtin_expect(nproc == 0, 0))
+        return 0;
     struct sembuf oper = { 
         .sem_flg = 0,
         .sem_num = num,
@@ -138,13 +146,7 @@ void solve (int id, int left, int right) {
     calc_t km = 1 - tau*tau/h/h;
     calc_t kl = tau*tau/2/h/h + tau/2/h;
     calc_t kr = tau*tau/2/h/h - tau/2/h;
-#   elif defined (LW2)
-    calc_t kf = tau;
-    calc_t km = - tau*tau/h/h;
-    calc_t kl = tau*tau/2/h/h + tau/2/h;
-    calc_t kr = tau*tau/2/h/h - tau/2/h + 1;
-    calc_t const aux_sum  = 1 / (2 * tau) + 1 / (2 * h);
-    calc_t const aux_diff = 1 / (2 * tau) - 1 / (2 * h);
+#   elif defined (EXACT)
 #   else
     #error Must define the scheme
 #   endif
@@ -156,13 +158,13 @@ void solve (int id, int left, int right) {
         acc (0, m) = phi (x);
     
     for (k = 1, t = tau; k < sizeT; ++k, t += tau) {
-        m = left, x = 0;
+        m = left, x = left * h;
         if (id == 0) 
             acc (k, m) = psi (t);
         else {
             sem_lock (id - 1);
             acc (k, m) = 
-#           if defined (REC) || defined (LW2)
+#           if defined (REC)
             rt (acc(k, m-1), acc(k-1, m), acc(k-1, m-1), 
                              aux_sum, aux_diff, f (t - tau / 2, x + h / 2));
 #           elif defined (LCOR)
@@ -170,13 +172,15 @@ void solve (int id, int left, int right) {
 #           elif defined (LW)
             lv (acc(k-1, m-1), acc(k-1, m), acc(k-1, m+1), f(t,x), 
                              kl, km, kr, kf);
+#           elif defined (EXACT)
+            solution (t, x);                 
 #           else
             NAN;
 #           endif
         }
 
 
-        for (m = left + 1, x = h; m < right; ++m, x += h) {
+        for (m = left + 1, x = (left + 1) * h; m < right; ++m, x += h) {
             acc (k, m) = 
 #           if defined (REC)
             rt (acc(k, m-1), acc(k-1, m), acc(k-1, m-1),
@@ -186,9 +190,8 @@ void solve (int id, int left, int right) {
 #           elif defined (LW)
             lv (acc(k-1, m-1), acc(k-1, m), acc(k-1, m+1), f(t,x), 
                              kl, km, kr, kf);
-#           elif defined (LW2)
-            lv (acc(k-1, m-2), acc(k-1, m-1), acc(k-1, m), f(t,x), 
-                             kl, km, kr, kf);
+#           elif defined (EXACT)
+            solution (t, x);  
 #           else
             NAN;
 #           endif
@@ -225,14 +228,14 @@ int main (int argc, char *argv[]) {
         return -1;
     }
 
-    semid = semget (IPC_PRIVATE, nproc - 1, 0600 | IPC_CREAT);
-    if (semid == -1) {
-        perror ("semget");
-        fprintf (stderr, "In case the message above says input params were invalid, "
-        "try to lower nproc\n");
-        unlink ("key");
-        exit (-1);
-    }
+    if (nproc > 1) { 
+        semid = semget (IPC_PRIVATE, nproc - 1, 0600 | IPC_CREAT);
+        if (semid == -1) {
+            perror ("semget");
+            exit (-1);
+        }
+    } else
+        semid = 0;
 
     if ((net = (calc_t *) malloc (sizeT * sizeX * sizeof (*net))) == NULL) {
         perror ("malloc");
